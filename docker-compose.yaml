@@ -1,7 +1,7 @@
 services:
   comfyui:
-    user: "1000:1000"
     build: .
+    user: root
     deploy:
       resources:
         reservations:
@@ -14,8 +14,7 @@ services:
     volumes:
       - "./models:/app/models"
       - "./input:/app/input"
-      - "./temp:/app/output/temp"
+      - "./output/temp:/app/output/temp"
       - "./output:/app/output"
       - "./user:/app/user"
-      - "./custom_venv:/app/custom_venv"
       - "./custom_nodes:/app/custom_nodes"
