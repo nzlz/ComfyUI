@@ -1893,6 +1893,156 @@ class EmptyImage:
         b = torch.full([batch_size, height, width, 1], ((color) & 0xFF) / 0xFF)
         return (torch.cat((r, g, b), dim=-1), )
 
+class ModelDownloader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "url": ("STRING", {"default": "https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"}),
+                    "model_type": (["checkpoints", "vae", "loras", "controlnet", "clip_vision", "style_models", "vae_approx", "text_encoders", "diffusion_models"], {"default": "checkpoints"}),
+                    "filename": ("STRING", {"default": "v1-5-pruned-emaonly.safetensors"}),
+                }}
+    
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "download_model"
+    OUTPUT_NODE = True
+    CATEGORY = "loaders/download"
+    DESCRIPTION = "Downloads a model from a URL and saves it to the appropriate folder in the container."
+
+    def download_model(self, url, model_type, filename):
+        import os
+        import sys
+        import logging
+        import time
+        
+        # Set up logging to ensure we see the output
+        logging.basicConfig(level=logging.INFO, 
+                           format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                           force=True)
+        logger = logging.getLogger('ModelDownloader')
+        
+        # Log to console
+        handler = logging.StreamHandler(sys.stdout)
+        logger.addHandler(handler)
+        
+        # Prevent propagation to root logger to avoid duplicate messages
+        logger.propagate = False
+        
+        logger.info(f"ModelDownloader starting with URL: {url}, model_type: {model_type}, filename: {filename}")
+        
+        try:
+            import requests
+        except ImportError:
+            import pip
+            logger.info("Installing requests package...")
+            pip.main(['install', 'requests'])
+            import requests
+            logger.info("Installed requests package")
+        
+        output_message = ""
+        
+        # Get the model directory path
+        try:
+            model_dirs = folder_paths.get_folder_paths(model_type)
+            logger.info(f"Available model directories for {model_type}: {model_dirs}")
+            if not model_dirs:
+                logger.error(f"No directories found for model_type: {model_type}")
+                return (f"Error: No directories found for model_type: {model_type}",)
+                
+            model_dir = model_dirs[0]
+            logger.info(f"Using model directory: {model_dir}")
+        except Exception as e:
+            err_message = f"Error getting model directory: {str(e)}"
+            logger.error(err_message)
+            return (err_message,)
+        
+        # Create the directory if it doesn't exist
+        try:
+            logger.info(f"Creating directory: {model_dir}")
+            os.makedirs(model_dir, exist_ok=True)
+        except Exception as e:
+            err_message = f"Error creating directory {model_dir}: {str(e)}"
+            logger.error(err_message)
+            return (err_message,)
+        
+        # Full path to save the model
+        save_path = os.path.join(model_dir, filename)
+        logger.info(f"Will save to: {save_path}")
+        
+        # Check if file already exists
+        if os.path.exists(save_path):
+            msg = f"File already exists at {save_path}"
+            logger.info(msg)
+            return (msg,)
+        
+        try:
+            # Make a request to the URL
+            logger.info(f"Starting download from {url}...")
+            time_started = time.time()
+            response = requests.get(url, stream=True)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            
+            # Get the total file size in bytes
+            total_size = int(response.headers.get('content-length', 0))
+            logger.info(f"Total file size: {total_size/1024/1024/1024:.2f} GB ({total_size:,} bytes)")
+            
+            # Download the file with a progress bar
+            logger.info(f"Starting download... This may take a while for large models.")
+            
+            # Custom progress tracking
+            downloaded_size = 0
+            last_percent_logged = -5  # Start at -5 so 0% gets logged
+            
+            with open(save_path, 'wb') as file:
+                for data in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                    size = file.write(data)
+                    downloaded_size += size
+                    
+                    # Log progress at 5% increments
+                    if total_size > 0:
+                        percent_complete = int(downloaded_size * 100 / total_size)
+                        if percent_complete >= last_percent_logged + 5 or percent_complete == 100:
+                            last_percent_logged = percent_complete // 5 * 5  # Round to nearest 5%
+                            
+                            # Calculate stats
+                            downloaded_mb = downloaded_size / 1024 / 1024
+                            downloaded_gb = downloaded_mb / 1024
+                            elapsed_time = time.time() - time_started
+                            mb_per_sec = downloaded_mb / max(elapsed_time, 0.1)
+                            
+                            # Estimate remaining time
+                            if percent_complete > 0:
+                                time_remaining = (elapsed_time / percent_complete) * (100 - percent_complete)
+                                time_remaining_str = f", ETA: {time_remaining:.0f}s"
+                            else:
+                                time_remaining_str = ""
+                            
+                            logger.info(f"Download: {percent_complete}% - {downloaded_gb:.2f}GB/{total_size/1024/1024/1024:.2f}GB ({mb_per_sec:.1f}MB/s{time_remaining_str})")
+            
+            # Update the folder paths to recognize the new file
+            download_time_seconds = time.time() - time_started
+            download_speed_mbps = (total_size / 1024 / 1024) / max(download_time_seconds, 1)
+            
+            logger.info(f"✅ DOWNLOAD COMPLETE: {total_size/1024/1024/1024:.2f}GB in {download_time_seconds:.1f} seconds ({download_speed_mbps:.2f}MB/s)")
+            logger.info("Refreshing available models...")
+            
+            # Refresh the models lists
+            try:
+                # Force refresh of the model lists
+                folder_paths.get_filename_list("checkpoints", force_reload=True)
+                if model_type != "checkpoints":
+                    folder_paths.get_filename_list(model_type, force_reload=True)
+            except Exception as e:
+                logger.warning(f"Note: Could not refresh model lists automatically: {str(e)}")
+            
+            output_message = f"Successfully downloaded model to {save_path}"
+            logger.info(output_message)
+        except Exception as e:
+            import traceback
+            output_message = f"Error downloading model: {str(e)}\n{traceback.format_exc()}"
+            logger.error(output_message)
+        
+        return (output_message,)
+
 class ImagePadForOutpaint:
 
     @classmethod
@@ -2025,6 +2175,7 @@ NODE_CLASS_MAPPINGS = {
     "ConditioningZeroOut": ConditioningZeroOut,
     "ConditioningSetTimestepRange": ConditioningSetTimestepRange,
     "LoraLoaderModelOnly": LoraLoaderModelOnly,
+    "ModelDownloader": ModelDownloader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2092,6 +2243,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # _for_testing
     "VAEDecodeTiled": "VAE Decode (Tiled)",
     "VAEEncodeTiled": "VAE Encode (Tiled)",
+    "ModelDownloader": "Download Model",
 }
 
 EXTENSION_WEB_DIRS = {}
